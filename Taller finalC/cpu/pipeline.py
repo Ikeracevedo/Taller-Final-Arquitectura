@@ -31,6 +31,8 @@ class PipelinedCPU:
         return operand
 
     def fetch(self):
+        if self.stall:
+            return  # no buscar nueva instrucción si hay stall
         if self.registers['PC'] < len(self.program):
             self.IF_stage = self.program[self.registers['PC']]
             self.registers['PC'] += 1
@@ -61,6 +63,7 @@ class PipelinedCPU:
                 take_branch = (self.registers['Z'] == 1)
             elif opcode == 'JNZ':
                 take_branch = (self.registers['Z'] == 0)
+
             if take_branch:
                 self.registers['PC'] = target
                 self.IF_stage = None
@@ -142,12 +145,31 @@ class PipelinedCPU:
                 else:
                     decoded['resolved_operands'].append(op)
 
+        elif opcode == 'STORE':
+            for i in range(len(operands)):
+                op = operands[i]
+                if isinstance(op, str) and op.startswith('R'):
+                    decoded['src_regs'].append(op)
+                    val = None
+                    if self.WB_stage and self.WB_stage.get('dest_reg') == op:
+                        val = self.WB_stage.get('result')
+                    elif self.MEM_stage and self.MEM_stage.get('dest_reg') == op:
+                        val = self.MEM_stage.get('result')
+                    elif self.EX_stage and self.EX_stage.get('dest_reg') == op and self.EX_stage['opcode'] != 'LOAD':
+                        val = self.EX_stage.get('result')
+                    if val is None:
+                        val = self.registers[op]
+                    decoded['resolved_operands'].append(val)
+                else:
+                    decoded['resolved_operands'].append(op)
+
         # Verificar load-use hazard
         hazard = False
         for src_reg in decoded['src_regs']:
             if self.EX_stage and self.EX_stage.get('dest_reg') == src_reg and self.EX_stage['opcode'] == 'LOAD':
                 hazard = True
                 break
+
             if self.MEM_stage and self.MEM_stage.get('dest_reg') == src_reg and self.MEM_stage['opcode'] == 'LOAD':
                 # Forwarding desde MEM para LOAD
                 decoded['resolved_operands'] = [decoded['resolved_operands'][0]] + [self.MEM_stage.get('result') if reg == src_reg else val for reg, val in zip(decoded['src_regs'], decoded['resolved_operands'][1:])]
@@ -309,10 +331,11 @@ class PipelinedCPU:
         self.cache.hits = 0
         self.cache.misses = 0
         self.fetch()
-        while (self.IF_stage or self.ID_stage or self.EX_stage or self.MEM_stage or self.WB_stage or self.device.data_ready) and self.cycle_count < max_cycles:
+        while any([self.IF_stage, self.ID_stage, self.EX_stage, self.MEM_stage, self.WB_stage]) or self.device.data_ready:
             print(f"\nCiclo {self.cycle_count}:")
             self.step()
             self.print_pipeline_state()
+
         metrics = {
             'cycles': self.cycle_count,
             'stalls': self.stall_count,
@@ -332,7 +355,7 @@ class PipelinedCPU:
             'ID': self.ID_stage['opcode'] if self.ID_stage and isinstance(self.ID_stage, dict) else 'NOP',
             'EX': self.EX_stage['opcode'] if self.EX_stage else 'NOP',
             'MEM': self.MEM_stage['opcode'] if self.MEM_stage else 'NOP',
-            'WB': self.MEM_stage['opcode'] if self.MEM_stage else 'NOP'
+            'WB': self.WB_stage['opcode'] if self.WB_stage else 'NOP'
         }
         print("Pipeline:", " | ".join(f"{stage}: {val}" for stage, val in stages.items()))
         print("Registros:", self.registers)
